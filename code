@@ -1,0 +1,153 @@
+import time
+import threading
+import random
+
+MAX_READY_QUEUE_SIZE = 20
+TIME_SLICE = 1
+
+class Process:
+    def __init__(self, pid, execution_time, value_score, starting_deadline, ending_deadline,arrival_time):
+        self.pid = pid
+        self.value_score = value_score
+        self.starting_deadline = starting_deadline
+        self.ending_deadline = ending_deadline  
+        self.execution_time = execution_time  
+        self.arrival_time = arrival_time  
+        self.ready_time = None  
+        self.start_time = None  
+        self.end_time = None  
+
+    def __repr__(self):
+        return f"Process {self.pid} (Score: {self.value_score}, Exec Left: {self.execution_time:.2f}, DL: {self.ending_deadline:.0f})"
+
+input_queue = []
+priority_queue = []
+completed_processes = []  
+failed_processes = []     
+pq_lock = threading.Lock()
+input_lock = threading.Lock()
+pid_counter = 1  
+process_completed_signal = threading.Event()
+
+def process_generator():
+    global pid_counter
+    while True:
+        t = time.time()
+        for _ in range(10):  
+            value_score = random.randrange(1,100)
+            starting_deadline = t + random.randrange(10, 20)
+            ending_deadline = t + random.randrange(21, 30)  
+            execution_time = random.randrange(1, 10)
+            arrival_time = time.time()
+            new_process = Process(pid_counter, execution_time,value_score, starting_deadline, ending_deadline,arrival_time)
+
+            with input_lock:
+                input_queue.append(new_process)
+                print(f"[+] New Process {new_process.pid} created (Exec: {new_process.execution_time:.2f}, DL: {new_process.ending_deadline:.0f})")
+
+            pid_counter += 1
+
+        time.sleep(12)    
+
+def scheduler():
+    while True:
+        time.sleep(0.6)
+        current_time = time.time()
+
+        with pq_lock:
+            expired_pq = [p for p in priority_queue if current_time >= p.ending_deadline]
+            priority_queue[:] = [p for p in priority_queue if current_time < p.ending_deadline]
+
+        for p in expired_pq:
+            failed_processes.append(p)
+            print(f"[✘] Process {p.pid} deadline exceeded and removed.")
+
+        with pq_lock, input_lock:
+            while input_queue:
+                best_input_process = max(input_queue, key=lambda p: p.value_score / p.ending_deadline)
+
+                if len(priority_queue) < MAX_READY_QUEUE_SIZE:
+                    input_queue.remove(best_input_process)
+                    best_input_process.ready_time = time.time()
+                    priority_queue.append(best_input_process)
+                    print(f"[→] Process {best_input_process.pid} moved to Priority Queue (Score Ratio: {best_input_process.value_score / best_input_process.ending_deadline:.2f})")
+                else:
+                    worst_pq_process = min(priority_queue, key=lambda p: p.value_score / p.ending_deadline)
+
+                    if (best_input_process.value_score / best_input_process.ending_deadline) > (worst_pq_process.value_score / worst_pq_process.ending_deadline):
+                        priority_queue.remove(worst_pq_process)
+                        input_queue.remove(best_input_process)
+                        best_input_process.ready_time = time.time()
+                        priority_queue.append(best_input_process)
+                        print(f"[⇄] Swapped Process {worst_pq_process.pid} (Score: {worst_pq_process.value_score}) with {best_input_process.pid} (Score: {best_input_process.value_score})")
+                        failed_processes.append(worst_pq_process)  # فرآیند ضعیف‌تر به عنوان ناموفق ذخیره شود
+                    else:
+                        # اگر جایگزینی لازم نیست، متوقف شو
+                        break
+
+        if process_completed_signal.is_set():
+            with pq_lock, input_lock:
+                if input_queue and len(priority_queue) < MAX_READY_QUEUE_SIZE:
+                    best_process = max(input_queue, key=lambda p: p.value_score / p.ending_deadline)
+                    input_queue.remove(best_process)
+                    best_process.ready_time = time.time()
+                    priority_queue.append(best_process)
+                    print(f"[→] Process {best_process.pid} moved to Priority Queue (Score Ratio: {best_process.value_score / best_process.ending_deadline:.2f})")
+                process_completed_signal.clear()
+
+
+def cpu_worker(cpu_id):
+    """CPU - Priority Queue Processor (Non-Preemptive Execution)"""
+    while True:
+        process = None  
+
+        with pq_lock:
+            if priority_queue:
+                best_candidate = max(priority_queue, key=lambda p: p.value_score / p.ending_deadline)
+                t=time.time()
+                if t + best_candidate.execution_time <= best_candidate.ending_deadline and t < best_candidate.starting_deadline:
+                    priority_queue.remove(best_candidate)
+                    process = best_candidate
+
+        if process:  
+            process.start_time = time.time()  # زمان شروع پردازش
+            print(f"[⚡ CPU-{cpu_id}] Process {process.pid} started execution for {process.execution_time:.2f} sec.")
+
+            time.sleep(process.execution_time)  # اجرای کامل بدون وقفه
+
+            process.end_time = time.time()  # زمان پایان پردازش
+            print(f"[✔ CPU-{cpu_id}] Process {process.pid} fully completed.")
+            completed_processes.append(process)
+            process_completed_signal.set()
+
+
+threading.Thread(target=process_generator, daemon=True).start()
+threading.Thread(target=scheduler, daemon=True).start()
+threading.Thread(target=cpu_worker, args=(1,), daemon=True).start()
+threading.Thread(target=cpu_worker, args=(2,), daemon=True).start()
+threading.Thread(target=cpu_worker, args=(3,), daemon=True).start()
+
+time.sleep(59)
+proces = 0
+print(len(completed_processes))
+print("\n===== Completed Processes =====")
+total_completed_score = sum(p.value_score for p in completed_processes)
+for p in completed_processes:
+    print(f"✔ Process {p.pid} (Score: {p.value_score}) (Start: {p.start_time}) (End: {p.end_time})")
+    proces += (p.end_time - p.arrival_time)
+
+print("\n===== Failed Processes =====")
+total_failed_score = sum(p.value_score for p in failed_processes)
+all_remaining_processes = priority_queue + input_queue
+failed_processes.extend(all_remaining_processes)
+
+for p in failed_processes:
+    print(f"✘ Process {p.pid} (Score: {p.value_score})")
+
+total_failed_score += sum(p.value_score for p in all_remaining_processes)
+
+print("\n===== Summary =====")
+print(f"Total Completed Score: {total_completed_score}")
+print(f"Total Failed Score: {total_failed_score}")
+print(f"Total Waiting Time: {proces}")
+print(f"Average Waiting Time: {proces / 50}")
